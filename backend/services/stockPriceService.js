@@ -299,16 +299,138 @@ const getBatchStockPrices = async (tickers) => {
   return { prices, errors };
 };
 
+// In-memory cache for historical series to avoid re-fetching on every page load
+// Structure: { ticker: { data: { 'YYYY-MM-DD': price }, last_updated: timestamp } }
+const historicalCache = {};
+
+/**
+ * Fetch full historical series from Alpha Vantage
+ */
+const fetchSeriesFromAlphaVantage = async (ticker) => {
+  const apiKey = process.env.ALPHA_VANTAGE_API_KEY;
+  if (!apiKey) throw new Error('ALPHA_VANTAGE_API_KEY not configured');
+
+  const url = `https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol=${ticker}&outputsize=full&apikey=${apiKey}`;
+
+  try {
+    const response = await axios.get(url, { timeout: 15000 });
+    const data = response.data;
+
+    if (data['Error Message']) throw new Error(`Invalid ticker: ${ticker}`);
+    if (data['Note']) throw new Error('API rate limit reached');
+
+    const series = data['Time Series (Daily)'];
+    if (!series) throw new Error(`No historical data for ${ticker}`);
+
+    const prices = {};
+    Object.keys(series).forEach(date => {
+      prices[date] = parseFloat(series[date]['4. close']);
+    });
+
+    return prices;
+  } catch (error) {
+    if (error.response) throw new Error(`API error: ${error.response.status}`);
+    throw error;
+  }
+};
+
+/**
+ * Fetch historical series from Polygon
+ * Defaults to last 5 years if using Aggs
+ */
+const fetchSeriesFromPolygon = async (ticker) => {
+  const apiKey = process.env.POLYGON_API_KEY;
+  if (!apiKey) throw new Error('POLYGON_API_KEY not configured');
+
+  // Calculate dates: From 5 years ago to Today
+  const toDate = new Date().toISOString().split('T')[0];
+  const fromDateObj = new Date();
+  fromDateObj.setFullYear(fromDateObj.getFullYear() - 5);
+  const fromDate = fromDateObj.toISOString().split('T')[0];
+
+  const url = `https://api.polygon.io/v2/aggs/ticker/${ticker}/range/1/day/${fromDate}/${toDate}?adjusted=true&sort=asc&limit=50000&apiKey=${apiKey}`;
+
+  try {
+    const response = await axios.get(url, { timeout: 15000 });
+    const data = response.data;
+
+    if (data.status !== 'OK' && data.status !== 'success') { // Polygon sometimes uses 'OK' sometimes 'success'
+      // If query returns 0 results but status OK, handle it?
+    }
+
+    if (!data.results) return {}; // No data found
+
+    const prices = {};
+    data.results.forEach(day => {
+      // Polygon returns 't' as unix timestamp in milliseconds
+      const dateStr = new Date(day.t).toISOString().split('T')[0];
+      prices[dateStr] = parseFloat(day.c);
+    });
+
+    return prices;
+  } catch (error) {
+    if (error.response) throw new Error(`API error: ${error.response.status}`);
+    throw error;
+  }
+};
+
+/**
+ * Get historical price series for a ticker (cached)
+ * Returns object: { 'YYYY-MM-DD': 150.23, ... }
+ */
+const getHistoricalPriceSeries = async (ticker) => {
+  const upperTicker = ticker.toUpperCase();
+  const CACHE_DURATION = 60 * 60 * 1000; // 1 hour
+
+  // Check Cache
+  if (historicalCache[upperTicker]) {
+    const age = Date.now() - historicalCache[upperTicker].last_updated;
+    if (age < CACHE_DURATION) {
+      return historicalCache[upperTicker].data;
+    }
+  }
+
+  const provider = process.env.STOCK_API_PROVIDER || 'alphavantage';
+  let prices = {};
+
+  try {
+    console.log(`Fetching historical series for ${upperTicker} from ${provider}...`);
+    if (provider === 'polygon') {
+      prices = await fetchSeriesFromPolygon(upperTicker);
+    } else {
+      prices = await fetchSeriesFromAlphaVantage(upperTicker);
+    }
+
+    // Update Cache
+    historicalCache[upperTicker] = {
+      data: prices,
+      last_updated: Date.now()
+    };
+
+    return prices;
+  } catch (error) {
+    console.error(`Error fetching historical series for ${upperTicker}:`, error.message);
+    // If we have stale cache, return it
+    if (historicalCache[upperTicker]) {
+      console.log('Returning stale cache.');
+      return historicalCache[upperTicker].data;
+    }
+    throw error;
+  }
+};
+
 /**
  * Get historical stock price for a specific date
- * @param {string} ticker - Stock ticker symbol
- * @param {string} date - Date in YYYY-MM-DD format
- * @returns {Promise<number>} Historical closing price
+ * (Legacy support, though we could rewrite to use series cache if precise date match?)
  */
 const getHistoricalPrice = async (ticker, date) => {
   const upperTicker = ticker.toUpperCase();
-  const provider = process.env.STOCK_API_PROVIDER || 'alphavantage';
+  // ... existing implementation or could rely on series ...
+  // Keeping existing implementation for safety unless we want to fully switch.
+  // The existing implementation handles 10-day lookback for holidays explicitly per request.
+  // Our new series logic handles "what data exists". 
 
+  const provider = process.env.STOCK_API_PROVIDER || 'alphavantage';
   try {
     if (provider === 'polygon') {
       return await fetchHistoricalFromPolygon(upperTicker, date);
@@ -326,5 +448,6 @@ module.exports = {
   getBatchStockPrices,
   getCachedPrice,
   updatePriceCache,
-  getHistoricalPrice
+  getHistoricalPrice,
+  getHistoricalPriceSeries
 };

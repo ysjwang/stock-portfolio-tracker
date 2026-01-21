@@ -24,6 +24,7 @@ const PerformanceChart = () => {
   const [error, setError] = useState('');
   const [tickInterval, setTickInterval] = useState('day');
   const [activeChart, setActiveChart] = useState('performance');
+  const [dateRange, setDateRange] = useState({ preset: 'all', start: null, end: null });
 
   useEffect(() => {
     const fetchData = async () => {
@@ -59,130 +60,190 @@ const PerformanceChart = () => {
       return;
     }
 
-    const resampleData = () => {
+    const processData = () => {
       const timestamps = rawData.map(d => d.timestamp);
-      const minTimestamp = Math.min(...timestamps);
-      const maxTimestamp = new Date().setHours(0, 0, 0, 0); // Today at midnight
+      // Min/Max from ALL data
+      const dataMinTimestamp = Math.min(...timestamps);
+      const today = new Date();
+      today.setHours(23, 59, 59, 999);
 
-      // Ensure we at least cover the range
-      const startDate = new Date(minTimestamp);
-      startDate.setHours(0, 0, 0, 0);
-      const endDate = new Date(maxTimestamp);
+      let startDateObj, endDateObj;
 
-      const resampled = [];
-      const current = new Date(startDate);
+      // Determine Start/End Date objects based on range
+      if (dateRange.preset === 'custom' && dateRange.start && dateRange.end) {
+        const [startYear, startMonth, startDay] = dateRange.start.split('-').map(Number);
+        startDateObj = new Date(startYear, startMonth - 1, startDay);
+        startDateObj.setHours(0, 0, 0, 0);
 
-      // Helper to find last known value
+        const [endYear, endMonth, endDay] = dateRange.end.split('-').map(Number);
+        endDateObj = new Date(endYear, endMonth - 1, endDay);
+        endDateObj.setHours(23, 59, 59, 999);
+      } else {
+        endDateObj = new Date(today);
+
+        switch (dateRange.preset) {
+          case '1m':
+            startDateObj = new Date(today);
+            startDateObj.setMonth(today.getMonth() - 1);
+            break;
+          case '6m':
+            startDateObj = new Date(today);
+            startDateObj.setMonth(today.getMonth() - 6);
+            break;
+          case 'ytd':
+            startDateObj = new Date(today.getFullYear(), 0, 1);
+            break;
+          case '1y':
+            startDateObj = new Date(today);
+            startDateObj.setFullYear(today.getFullYear() - 1);
+            break;
+          case 'all':
+          default:
+            startDateObj = new Date(dataMinTimestamp);
+            break;
+        }
+        startDateObj.setHours(0, 0, 0, 0);
+      }
+
+      if (startDateObj > endDateObj) {
+        startDateObj = new Date(endDateObj);
+        startDateObj.setHours(0, 0, 0, 0);
+      }
+
+      // Sort rawData to be sure
+      const sortedData = [...rawData].sort((a, b) => a.timestamp - b.timestamp);
+
+      // Helper for Step Interpolation (Invested Amount, etc.)
       const getLastKnownValue = (timestamp) => {
-        // Find the latest data point that is <= timestamp
-        // Since rawData is likely sorted by date (API usually returns sorted), we can search.
-        // If not sorted, we should sort rawData first. Assuming sorted ascending.
         let lastKnown = null;
-        for (let i = 0; i < rawData.length; i++) {
-          if (rawData[i].timestamp <= timestamp) {
-            lastKnown = rawData[i];
+        for (let i = 0; i < sortedData.length; i++) {
+          if (sortedData[i].timestamp <= timestamp) {
+            lastKnown = sortedData[i];
           } else {
             break;
           }
         }
-
-        // If before first transaction, technically 0 investment and value.
-        // But we are starting from minTimestamp, so at least one point (the first transaction) should match.
-        if (!lastKnown && rawData.length > 0) {
-          // Fallback to the very first point if somehow we query before it (shouldn't happen with startDate=min)
-          return rawData[0];
+        if (!lastKnown && sortedData.length > 0) {
+          // Before first data point
+          return { ...sortedData[0], value: 0, invested: 0 };
+          // Or return null? If we return sortedData[0], we get flat line before start.
+          // Returning 0 makes more sense for "invested".
         }
         return lastKnown;
       };
 
+      // Helper for Linear Interpolation (Portfolio Value)
+      const getInterpolatedValue = (timestamp) => {
+        if (sortedData.length === 0) return 0;
+
+        // Find Prev and Next
+        let prev = null;
+        let next = null;
+
+        for (let i = 0; i < sortedData.length; i++) {
+          if (sortedData[i].timestamp <= timestamp) {
+            prev = sortedData[i];
+          }
+          if (sortedData[i].timestamp > timestamp) {
+            next = sortedData[i];
+            break;
+          }
+        }
+
+        if (!prev) {
+          // Before all data
+          return 0; // Or sortedData[0].value if we assume flat start?
+        }
+        if (!next) {
+          // After all data (or exactly at last point)
+          return prev.value;
+        }
+
+        // Interpolate
+        const timeDiff = next.timestamp - prev.timestamp;
+        if (timeDiff === 0) return prev.value;
+
+        const progress = (timestamp - prev.timestamp) / timeDiff;
+        const valueDiff = next.value - prev.value;
+
+        return prev.value + (progress * valueDiff);
+      };
+
+
+      const resampled = [];
+      const current = new Date(startDateObj);
+
+      // Setup loop start based on interval to align nicely
       if (tickInterval === 'year') {
-        // Set to Jan 1st of the start year
         current.setMonth(0, 1);
-        while (current <= endDate) {
-          if (current >= startDate) {
-            const lastKnown = getLastKnownValue(current.getTime());
-            if (lastKnown) {
-              resampled.push({
-                ...lastKnown, // value, invested
-                timestamp: current.getTime(),
-                date: current.toISOString() // consistent format just in case
-              });
-            }
-          }
-          current.setFullYear(current.getFullYear() + 1);
-        }
+        // If adjusting to start of year moved us BEFORE startDate, we catch up in loop or just accept it?
+        // We should ensure we don't emit points before startDate for the chart cleanly?
+        // Actually, Resampling usually means "Give me points at these intervals".
       } else if (tickInterval === 'month') {
-        // Set to 1st of the start month
         current.setDate(1);
-        while (current <= endDate) {
-          if (current >= startDate) {
-            const lastKnown = getLastKnownValue(current.getTime());
-            if (lastKnown) {
-              resampled.push({
-                ...lastKnown,
-                timestamp: current.getTime(),
-                date: current.toISOString()
-              });
-            }
-          }
-          current.setMonth(current.getMonth() + 1);
-        }
       } else {
-        // Day
-        while (current <= endDate) {
-          const lastKnown = getLastKnownValue(current.getTime());
+        // day, align to midnight (already done)
+      }
+
+      const endTs = endDateObj.getTime();
+
+      // Ensure we include the start range boundary if it's not aligned?
+      // Recharts lines starting midway might be fine.
+
+      // Loop
+      while (current.getTime() <= endTs) {
+        const ts = current.getTime();
+
+        // Only add if >= startDate (handling the alignment offset)
+        if (ts >= startDateObj.getTime()) {
+          const lastKnown = getLastKnownValue(ts); // For meta/invested
+          const interpolatedVal = getInterpolatedValue(ts); // For value
+
           if (lastKnown) {
             resampled.push({
-              ...lastKnown,
-              timestamp: current.getTime(),
-              date: current.toISOString()
+              timestamp: ts,
+              date: current.toISOString(),
+              invested: lastKnown.invested, // Step
+              value: interpolatedVal,       // Linear
+              // Keep other props from lastKnown if needed for tooltip? 
+              // Note: other props might be stale if we linearly interpolate 'value'.
+              // But 'invested' is correct.
             });
           }
+        }
+
+        // Increment
+        if (tickInterval === 'year') {
+          current.setFullYear(current.getFullYear() + 1);
+        } else if (tickInterval === 'month') {
+          current.setMonth(current.getMonth() + 1);
+        } else {
           current.setDate(current.getDate() + 1);
         }
       }
 
-      // Ensure the very last point (Today) is included?
-      // User requested "end date should be today".
-      // Our loops go <= endDate. 
-      // If today is not a "tick" in year/month mode (e.g. today is Mar 15, tick is Mar 1), do we show Mar 15?
-      // "the ticks that exist on the graph... the number of ticks should be determined by the picker"
-      // If user picks "Month", ticks are months. 
-      // But if we only show ticks, the line ends at the last tick.
-      // If Today is May 15, and last tick is May 1. 
-      // User requirement: "end date should be today".
-      // This implies the axis ends today.
-      // If we only provide data up to May 1, the line stops short.
-      // If we provide data for May 15, but it's not a "month tick", Recharts will show the point but maybe not the label.
-      // Let's add specific logic: Always add a point for "Today" if the last tick wasn't today?
-      // Or maybe the user strictly wants "ticks" to determine data points.
-      // "number of ticks should be determined by Day/Month/Year picker".
-      // If I pick Year, I get 2023, 2024, 2025. 
-      // If today is 2026-01-21. I should see ticks for 2023, 2024, 2025, 2026.
-      // My loop generates ticks.
-      // If today is midway through a year/month?
-      // Generally for "Month" view, you expect monthly points. If you are halfway through the month, do you show the partial month? Yes usually.
-      // The loop generates 1st of month.
-      // If today is Jan 21. 
-      // Jan 1 is generated. 
-      // Next is Feb 1 (future).
-      // So line stops at Jan 1. 
-      // The axis domain goes to Today (Jan 21).
-      // So there is a gap at the end.
-      // Let's explicitly add "Today" as a data point effectively? 
-      // Or does "ticks determined by picker" mean "only show these specific points"?
-      // "show the accurate price per tick though".
-      // This implies: For every TICK shown on the axis, show the price.
-      // It does NOT explicitly demand a point at "Today" if "Today" is not a tick.
-      // But "end date should be today" (Requirement 2).
-      // If end date is today, and last tick is 20 days ago, it looks weird.
-      // I will stick to generated ticks for now.
+      // Explicitly add "Today" / EndDate point if missing?
+      // This ensures the graph reaches the right edge.
+      const lastResampled = resampled[resampled.length - 1];
+      if (!lastResampled || lastResampled.timestamp < endTs) {
+        const ts = endTs;
+        const lastKnown = getLastKnownValue(ts);
+        const interpolatedVal = getInterpolatedValue(ts);
+        if (lastKnown) {
+          resampled.push({
+            timestamp: ts,
+            date: new Date(ts).toISOString(),
+            invested: lastKnown.invested,
+            value: interpolatedVal,
+          });
+        }
+      }
 
       setChartData(resampled);
     };
 
-    resampleData();
-  }, [rawData, tickInterval]);
+    processData();
+  }, [rawData, tickInterval, dateRange]);
 
   const formatCurrency = (value) => {
     return new Intl.NumberFormat('en-US', {
@@ -205,23 +266,27 @@ const PerformanceChart = () => {
     }
   };
 
-  // Ticks are now simply the timestamps of our data points!
-  // Since we constructed chartData EXACTLY based on intended ticks.
   const getTicks = () => {
     return chartData.map(d => d.timestamp);
   };
 
   const getDomain = () => {
     if (chartData.length === 0) return ['auto', 'auto'];
-    const minTimestamp = chartData[0].timestamp; // Start date
-    const maxTimestamp = new Date().getTime(); // Today
-    // Or simply match data? 
-    // "start date should be date of earliest transaction" -> minTimestamp matches this (approx)
-    // "end date should be today".
-    // If we force domain to Today, but last data point is Jan 1 (and today is Jan 21), we have a gap.
-    // I will extend domain to today to be safe.
-    return [minTimestamp, maxTimestamp];
+    // Extend domain to end of day if it's "today"
+    // To ensures the graph assumes the full time range even if data stops earlier (though we added start point).
+    // Let's stick to data extent to keep lines clean.
+    return [chartData[0].timestamp, chartData[chartData.length - 1].timestamp];
   };
+
+  const handleDateRangeChange = (e) => {
+    const val = e.target.value;
+    setDateRange(prev => ({ ...prev, preset: val }));
+  };
+
+  const handleCustomDateChange = (type, val) => {
+    setDateRange(prev => ({ ...prev, [type]: val }));
+  };
+
 
   if (loading) {
     return (
@@ -254,48 +319,87 @@ const PerformanceChart = () => {
 
   return (
     <div className="card">
-      <div className="flex justify-between items-center mb-6">
-        <h2 className="text-2xl font-bold">Performance</h2>
-        <div className="flex gap-2">
-          {activeChart === 'performance' && (
-            <div className="flex bg-gray-100 rounded-lg p-1 mr-4">
+      <div className="flex flex-col gap-4 mb-6">
+        <div className="flex justify-between items-center">
+          <h2 className="text-2xl font-bold">Performance</h2>
+          <div className="flex gap-2">
+            <button
+              onClick={() => setActiveChart('performance')}
+              className={`btn ${activeChart === 'performance' ? 'btn-primary' : 'btn-secondary'}`}
+            >
+              Timeline
+            </button>
+            <button
+              onClick={() => setActiveChart('allocation')}
+              className={`btn ${activeChart === 'allocation' ? 'btn-primary' : 'btn-secondary'}`}
+            >
+              Allocation
+            </button>
+          </div>
+        </div>
+
+        {activeChart === 'performance' && (
+          <div className="flex flex-wrap items-center gap-4 bg-gray-50 p-3 rounded-lg border border-gray-100">
+            {/* Interval Toggles */}
+            <div className="flex bg-white rounded-md border border-gray-200 shadow-sm p-1">
               <button
                 onClick={() => setTickInterval('day')}
-                className={`px-3 py-1 text-sm rounded-md transition-colors ${tickInterval === 'day' ? 'bg-white shadow text-primary-600 font-medium' : 'text-gray-600 hover:bg-gray-200'
-                  }`}
+                className={`px-3 py-1 text-sm rounded transition-colors ${tickInterval === 'day' ? 'bg-primary-50 text-primary-700 font-medium' : 'text-gray-600 hover:bg-gray-50'}`}
               >
                 Day
               </button>
               <button
                 onClick={() => setTickInterval('month')}
-                className={`px-3 py-1 text-sm rounded-md transition-colors ${tickInterval === 'month' ? 'bg-white shadow text-primary-600 font-medium' : 'text-gray-600 hover:bg-gray-200'
-                  }`}
+                className={`px-3 py-1 text-sm rounded transition-colors ${tickInterval === 'month' ? 'bg-primary-50 text-primary-700 font-medium' : 'text-gray-600 hover:bg-gray-50'}`}
               >
                 Month
               </button>
               <button
                 onClick={() => setTickInterval('year')}
-                className={`px-3 py-1 text-sm rounded-md transition-colors ${tickInterval === 'year' ? 'bg-white shadow text-primary-600 font-medium' : 'text-gray-600 hover:bg-gray-200'
-                  }`}
+                className={`px-3 py-1 text-sm rounded transition-colors ${tickInterval === 'year' ? 'bg-primary-50 text-primary-700 font-medium' : 'text-gray-600 hover:bg-gray-50'}`}
               >
                 Year
               </button>
             </div>
-          )}
-          <button
-            onClick={() => setActiveChart('performance')}
-            className={`btn ${activeChart === 'performance' ? 'btn-primary' : 'btn-secondary'
-              }`}
-          >
-            Timeline
-          </button>
-          <button
-            onClick={() => setActiveChart('allocation')}
-            className={`btn ${activeChart === 'allocation' ? 'btn-primary' : 'btn-secondary'}`}
-          >
-            Allocation
-          </button>
-        </div>
+
+            <div className="h-6 w-px bg-gray-300 mx-2 hidden sm:block"></div>
+
+            {/* Date Range Select */}
+            <div className="flex items-center gap-2">
+              <span className="text-sm text-gray-500">Range:</span>
+              <select
+                className="form-select text-sm py-1 px-2 border-gray-300 rounded-md shadow-sm focus:border-primary-500 focus:ring-primary-500"
+                value={dateRange.preset}
+                onChange={handleDateRangeChange}
+              >
+                <option value="all">All Time</option>
+                <option value="1m">Last Month</option>
+                <option value="6m">Last 6 Months</option>
+                <option value="ytd">Year to Date (YTD)</option>
+                <option value="1y">Last Year</option>
+                <option value="custom">Custom</option>
+              </select>
+            </div>
+
+            {dateRange.preset === 'custom' && (
+              <div className="flex items-center gap-2 animate-fadeIn">
+                <input
+                  type="date"
+                  className="form-input text-sm py-1 px-2 border-gray-300 rounded-md shadow-sm"
+                  onChange={(e) => handleCustomDateChange('start', e.target.value)}
+                  value={dateRange.start || ''}
+                />
+                <span className="text-gray-400">-</span>
+                <input
+                  type="date"
+                  className="form-input text-sm py-1 px-2 border-gray-300 rounded-md shadow-sm"
+                  onChange={(e) => handleCustomDateChange('end', e.target.value)}
+                  value={dateRange.end || ''}
+                />
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       {activeChart === 'performance' && chartData.length > 0 && (
@@ -309,8 +413,8 @@ const PerformanceChart = () => {
                 domain={getDomain()}
                 ticks={getTicks()}
                 tickFormatter={formatDate}
-                interval={0} // Force show all ticks we generated
-                minTickGap={0} // We want our specific ticks
+                interval={0}
+                minTickGap={0}
               />
               <YAxis tickFormatter={formatCurrency} domain={['auto', 'auto']} />
               <Tooltip

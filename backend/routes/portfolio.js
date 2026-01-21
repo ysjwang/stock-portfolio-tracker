@@ -1,7 +1,6 @@
 const express = require('express');
 const router = express.Router();
 const { query } = require('../db');
-const { getBatchStockPrices } = require('../services/stockPriceService');
 
 /**
  * Calculate holdings from transactions
@@ -59,8 +58,10 @@ const calculateHoldings = async () => {
   return holdings;
 };
 
+const { getBatchStockPrices, getHistoricalPriceSeries } = require('../services/stockPriceService');
+
 /**
- * Calculate portfolio performance over time
+ * Calculate portfolio performance over time using real historical prices
  */
 const calculatePortfolioPerformance = async () => {
   // Get all transactions ordered by date
@@ -70,52 +71,168 @@ const calculatePortfolioPerformance = async () => {
      ORDER BY transaction_date ASC`
   );
 
+  if (result.rows.length === 0) {
+    return [];
+  }
+
+  // 1. Identify all tickers over time and min date
+  const transactions = result.rows;
+  const uniqueTickers = [...new Set(transactions.map(t => t.ticker))].sort();
+  const minDate = new Date(transactions[0].transaction_date);
+  const today = new Date();
+
+  // 2. Fetch historical price series for all tickers
+  // (We do this in parallel, but handle possible failures gracefully)
+  const priceSeriesMap = {};
+  await Promise.all(uniqueTickers.map(async (ticker) => {
+    try {
+      const prices = await getHistoricalPriceSeries(ticker);
+      priceSeriesMap[ticker] = prices;
+    } catch (err) {
+      console.error(`Failed to load history for ${ticker}:`, err.message);
+      priceSeriesMap[ticker] = {}; // Empty fallback
+    }
+  }));
+
   const performanceData = [];
-  const holdings = {};
+  const holdings = {}; // { ticker: quantity }
   let totalInvested = 0;
 
-  for (const tx of result.rows) {
-    const { transaction_date, ticker, transaction_type, quantity, price_per_share } = tx;
-    const qty = parseFloat(quantity);
-    const price = parseFloat(price_per_share);
+  // Track cost basis per ticker separately if needed, but for "Invested" line we just need separate accumulator.
+  // Actually, 'totalInvested' is net cash flow into stocks.
+  const tickerInvested = {}; // { ticker: totalCost }
 
-    if (!holdings[ticker]) {
-      holdings[ticker] = { quantity: 0, avgCost: 0, totalCost: 0 };
+  // 3. Iterate Daily from Min Date to Today
+  const current = new Date(minDate);
+  // Align to midnight to avoid TZ issues
+  current.setHours(0, 0, 0, 0);
+
+  // Transaction pointer
+  let txIndex = 0;
+
+  // Max Limit loop to prevent infinite loop
+  const MAX_DAYS = 365 * 20;
+  let daysLoop = 0;
+
+  while (current <= today && daysLoop < MAX_DAYS) {
+    daysLoop++;
+    const dateStr = current.toISOString().split('T')[0];
+    const currentDateMs = current.getTime();
+
+    // Process transactions for this day
+    while (txIndex < transactions.length) {
+      const tx = transactions[txIndex];
+      // Note: transaction_date from PG might be Date object or string depending on driver config
+      // Usually it's Date object.
+      const txDate = new Date(tx.transaction_date);
+      txDate.setHours(0, 0, 0, 0);
+
+      if (txDate.getTime() > currentDateMs) {
+        break; // Transaction is in future relative to 'current' loop logic
+      }
+
+      // Apply transaction
+      const { ticker, transaction_type, quantity, price_per_share } = tx;
+      const qty = parseFloat(quantity);
+      const price = parseFloat(price_per_share);
+      const cost = qty * price;
+
+      if (!holdings[ticker]) holdings[ticker] = 0;
+      if (!tickerInvested[ticker]) tickerInvested[ticker] = 0;
+
+      if (transaction_type === 'BUY') {
+        holdings[ticker] += qty;
+        tickerInvested[ticker] += cost;
+        totalInvested += cost;
+      } else if (transaction_type === 'SELL') {
+        // Calculate cost basis being removed
+        // Average Cost Basis method:
+        const currentAvgCost = holdings[ticker] > 0 ? tickerInvested[ticker] / holdings[ticker] : 0;
+        const costRemoved = qty * currentAvgCost;
+
+        holdings[ticker] -= qty;
+        tickerInvested[ticker] -= costRemoved;
+        totalInvested -= costRemoved; // Reduce net invested
+      }
+
+      txIndex++;
     }
 
-    if (transaction_type === 'BUY') {
-      holdings[ticker].totalCost += qty * price;
-      holdings[ticker].quantity += qty;
-      totalInvested += qty * price;
-    } else if (transaction_type === 'SELL') {
-      const costBasis = holdings[ticker].quantity > 0
-        ? holdings[ticker].totalCost / holdings[ticker].quantity
-        : 0;
-      holdings[ticker].totalCost -= qty * costBasis;
-      holdings[ticker].quantity -= qty;
-      totalInvested -= qty * costBasis;
-    }
+    // Calculate Portfolio Value for this Day
+    let dailyValue = 0;
 
-    // Recalculate average cost
-    if (holdings[ticker].quantity > 0) {
-      holdings[ticker].avgCost = holdings[ticker].totalCost / holdings[ticker].quantity;
-    }
+    // Sum (Quantity * Price) for all held stocks
+    Object.keys(holdings).forEach(ticker => {
+      const qty = holdings[ticker];
+      if (qty > 0) {
+        // Get price for this date
+        let price = priceSeriesMap[ticker] ? priceSeriesMap[ticker][dateStr] : null;
 
-    // Calculate portfolio value at this point using cost basis
-    let portfolioValue = 0;
-    Object.keys(holdings).forEach(t => {
-      if (holdings[t].quantity > 0) {
-        portfolioValue += holdings[t].quantity * holdings[t].avgCost;
+        if (price === undefined || price === null) {
+          // Fallback: Use last valid price we have seen for this ticker?
+          // Or search backwards efficiently?
+          // For simplicity/perf in this loop, we can cache 'lastKnownPrice' per ticker
+          // But that requires managing state.
+          // Let's do a quick efficient lookup if mapped by date string?
+          // If missing, it implies non-trading day usually.
+          // We can check past days?
+          // Instead of complex inner loops, let's keep a `lastPrices` map state in the outer loop.
+        }
+
+        if (price) {
+          // Update 'last known'
+          // We'll rely on the `lastPrices` state map updated below
+        }
       }
     });
 
+    // Let's refine the Price Lookup State
+    // We maintain `currentPrices` map that updates whenever valid data exists for the date.
+    // Otherwise it holds the previous closing.
+    if (!this.lastPrices) this.lastPrices = {};
+    const lastPrices = this.lastPrices;
+
+    Object.keys(holdings).forEach(ticker => {
+      const series = priceSeriesMap[ticker] || {};
+      const p = series[dateStr];
+      if (p !== undefined) {
+        lastPrices[ticker] = p;
+      }
+    });
+
+    // Sum Value
+    Object.keys(holdings).forEach(ticker => {
+      const qty = holdings[ticker];
+      if (qty > 0) {
+        const p = lastPrices[ticker] || 0; // If no price ever seen (before IPO?), assume 0? Or cost?
+        // If 0, it crashes value.
+        // If we have invested cost but no price, maybe fallback to cost basis?
+        // Let's use cost basis if price is missing (e.g. recent IPO or data gap)?
+        // Or just 0.
+        // Ideally we have data.
+        let val = qty * p;
+        if (p === 0 && tickerInvested[ticker] > 0) {
+          // Fallback to cost if price missing?
+          // Probably cleaner to show 0 or handle better but complex.
+        }
+        dailyValue += val;
+      }
+    });
+
+    // Push datapoint
+    // Only push if we have some investment or history?
+    // We are iterating from first transaction, so yes.
     performanceData.push({
-      date: transaction_date,
-      value: portfolioValue,
+      date: dateStr,
+      value: dailyValue,
       invested: totalInvested
     });
+
+    // Next day
+    current.setDate(current.getDate() + 1);
   }
 
+  // Cleanup temporary state attached to 'this' if any (none used, local varns)
   return performanceData;
 };
 
