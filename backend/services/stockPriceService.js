@@ -74,6 +74,7 @@ const fetchFromPolygon = async (ticker) => {
 
 /**
  * Fetch historical stock price from Polygon.io API by date
+ * If the exact date is not available (weekend/holiday), fall back to the nearest previous trading day
  */
 const fetchHistoricalFromPolygon = async (ticker, date) => {
   const apiKey = process.env.POLYGON_API_KEY;
@@ -83,30 +84,42 @@ const fetchHistoricalFromPolygon = async (ticker, date) => {
 
   // Format date as YYYY-MM-DD
   const dateStr = date.split('T')[0];
+  let currentDate = new Date(dateStr);
 
-  // Get the daily close price for the specific date
-  const url = `https://api.polygon.io/v1/open-close/${ticker}/${dateStr}?adjusted=true&apiKey=${apiKey}`;
+  // Try up to 10 days back to find a trading day
+  for (let i = 0; i < 10; i++) {
+    const tryDateStr = currentDate.toISOString().split('T')[0];
+    const url = `https://api.polygon.io/v1/open-close/${ticker}/${tryDateStr}?adjusted=true&apiKey=${apiKey}`;
 
-  try {
-    const response = await axios.get(url, { timeout: 10000 });
-    const data = response.data;
+    try {
+      const response = await axios.get(url, { timeout: 10000 });
+      const data = response.data;
 
-    if (data.status === 'ERROR' || data.status === 'NOT_FOUND' || !data.close) {
-      throw new Error(`No price data available for ${ticker} on ${dateStr}`);
+      if (data.status !== 'ERROR' && data.status !== 'NOT_FOUND' && data.close) {
+        // Log if we had to fall back to a different date
+        if (i > 0) {
+          console.log(`No data for ${ticker} on ${dateStr}, using ${tryDateStr} instead`);
+        }
+        // Return the close price
+        return parseFloat(data.close);
+      }
+    } catch (error) {
+      // If 404, try previous day; otherwise throw
+      if (!error.response || error.response.status !== 404) {
+        throw new Error(`API error: ${error.response?.status || error.message}`);
+      }
     }
 
-    // Return the close price
-    return parseFloat(data.close);
-  } catch (error) {
-    if (error.response) {
-      throw new Error(`API error: ${error.response.status}`);
-    }
-    throw error;
+    // Move to previous day
+    currentDate.setDate(currentDate.getDate() - 1);
   }
+
+  throw new Error(`No price data available for ${ticker} around ${dateStr} (checked 10 days back)`);
 };
 
 /**
  * Fetch historical stock price from Alpha Vantage API by date
+ * If the exact date is not available (weekend/holiday), fall back to the nearest previous trading day
  */
 const fetchHistoricalFromAlphaVantage = async (ticker, date) => {
   const apiKey = process.env.ALPHA_VANTAGE_API_KEY;
@@ -134,15 +147,28 @@ const fetchHistoricalFromAlphaVantage = async (ticker, date) => {
       throw new Error(`No historical data available for ${ticker}`);
     }
 
-    // Format date as YYYY-MM-DD
+    // Format date as YYYY-MM-DD and try to find nearest previous trading day
     const dateStr = date.split('T')[0];
-    const dayData = timeSeries[dateStr];
+    let currentDate = new Date(dateStr);
 
-    if (!dayData || !dayData['4. close']) {
-      throw new Error(`No price data available for ${ticker} on ${dateStr}`);
+    // Try up to 10 days back to find a trading day
+    for (let i = 0; i < 10; i++) {
+      const tryDateStr = currentDate.toISOString().split('T')[0];
+      const dayData = timeSeries[tryDateStr];
+
+      if (dayData && dayData['4. close']) {
+        // Log if we had to fall back to a different date
+        if (i > 0) {
+          console.log(`No data for ${ticker} on ${dateStr}, using ${tryDateStr} instead`);
+        }
+        return parseFloat(dayData['4. close']);
+      }
+
+      // Move to previous day
+      currentDate.setDate(currentDate.getDate() - 1);
     }
 
-    return parseFloat(dayData['4. close']);
+    throw new Error(`No price data available for ${ticker} around ${dateStr} (checked 10 days back)`);
   } catch (error) {
     if (error.response) {
       throw new Error(`API error: ${error.response.status}`);
