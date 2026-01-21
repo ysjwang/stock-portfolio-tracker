@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { transactionApi } from '../services/api';
+import { useState, useEffect } from 'react';
+import { transactionApi, stockApi } from '../services/api';
 
 const TransactionForm = ({ onTransactionAdded, editTransaction, onCancel }) => {
   const [formData, setFormData] = useState(
@@ -13,6 +13,40 @@ const TransactionForm = ({ onTransactionAdded, editTransaction, onCancel }) => {
   );
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [autoSetPrice, setAutoSetPrice] = useState(false);
+  const [fetchingPrice, setFetchingPrice] = useState(false);
+
+  // Fetch historical price when auto-set is enabled and we have ticker and date
+  useEffect(() => {
+    const fetchHistoricalPrice = async () => {
+      if (!autoSetPrice || !formData.ticker || !formData.transaction_date) {
+        return;
+      }
+
+      setFetchingPrice(true);
+      setError('');
+
+      try {
+        const response = await stockApi.getHistoricalPrice(
+          formData.ticker.toUpperCase(),
+          formData.transaction_date
+        );
+
+        setFormData((prev) => ({
+          ...prev,
+          price_per_share: response.data.data.price.toFixed(2),
+        }));
+      } catch (err) {
+        const errorMsg = err.response?.data?.error || 'Failed to fetch historical price';
+        setError(errorMsg + '. Please enter the price manually or try a different date.');
+        setAutoSetPrice(false);
+      } finally {
+        setFetchingPrice(false);
+      }
+    };
+
+    fetchHistoricalPrice();
+  }, [autoSetPrice, formData.ticker, formData.transaction_date]);
 
   const handleChange = (e) => {
     const { name, value } = e.target;
@@ -20,6 +54,17 @@ const TransactionForm = ({ onTransactionAdded, editTransaction, onCancel }) => {
       ...prev,
       [name]: value,
     }));
+  };
+
+  const handleAutoSetPriceChange = (e) => {
+    setAutoSetPrice(e.target.checked);
+    if (!e.target.checked) {
+      // Clear the price when unchecking
+      setFormData((prev) => ({
+        ...prev,
+        price_per_share: '',
+      }));
+    }
   };
 
   const handleSubmit = async (e) => {
@@ -168,7 +213,23 @@ const TransactionForm = ({ onTransactionAdded, editTransaction, onCancel }) => {
               step="0.01"
               min="0.01"
               required
+              disabled={autoSetPrice || fetchingPrice}
             />
+            <div className="mt-2">
+              <label className="flex items-center text-sm text-gray-700 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={autoSetPrice}
+                  onChange={handleAutoSetPriceChange}
+                  className="mr-2 h-4 w-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500"
+                  disabled={fetchingPrice}
+                />
+                <span>
+                  Auto-set price based on transaction date
+                  {fetchingPrice && ' (fetching...)'}
+                </span>
+              </label>
+            </div>
           </div>
 
           {/* Total Value (calculated) */}

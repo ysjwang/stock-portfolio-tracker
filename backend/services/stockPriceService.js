@@ -73,6 +73,85 @@ const fetchFromPolygon = async (ticker) => {
 };
 
 /**
+ * Fetch historical stock price from Polygon.io API by date
+ */
+const fetchHistoricalFromPolygon = async (ticker, date) => {
+  const apiKey = process.env.POLYGON_API_KEY;
+  if (!apiKey) {
+    throw new Error('POLYGON_API_KEY not configured');
+  }
+
+  // Format date as YYYY-MM-DD
+  const dateStr = date.split('T')[0];
+
+  // Get the daily close price for the specific date
+  const url = `https://api.polygon.io/v1/open-close/${ticker}/${dateStr}?adjusted=true&apiKey=${apiKey}`;
+
+  try {
+    const response = await axios.get(url, { timeout: 10000 });
+    const data = response.data;
+
+    if (data.status === 'ERROR' || data.status === 'NOT_FOUND' || !data.close) {
+      throw new Error(`No price data available for ${ticker} on ${dateStr}`);
+    }
+
+    // Return the close price
+    return parseFloat(data.close);
+  } catch (error) {
+    if (error.response) {
+      throw new Error(`API error: ${error.response.status}`);
+    }
+    throw error;
+  }
+};
+
+/**
+ * Fetch historical stock price from Alpha Vantage API by date
+ */
+const fetchHistoricalFromAlphaVantage = async (ticker, date) => {
+  const apiKey = process.env.ALPHA_VANTAGE_API_KEY;
+  if (!apiKey) {
+    throw new Error('ALPHA_VANTAGE_API_KEY not configured');
+  }
+
+  const url = `https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol=${ticker}&apikey=${apiKey}`;
+
+  try {
+    const response = await axios.get(url, { timeout: 10000 });
+    const data = response.data;
+
+    // Check for API error messages
+    if (data['Error Message']) {
+      throw new Error(`Invalid ticker symbol: ${ticker}`);
+    }
+
+    if (data['Note']) {
+      throw new Error('API rate limit reached. Please try again later.');
+    }
+
+    const timeSeries = data['Time Series (Daily)'];
+    if (!timeSeries) {
+      throw new Error(`No historical data available for ${ticker}`);
+    }
+
+    // Format date as YYYY-MM-DD
+    const dateStr = date.split('T')[0];
+    const dayData = timeSeries[dateStr];
+
+    if (!dayData || !dayData['4. close']) {
+      throw new Error(`No price data available for ${ticker} on ${dateStr}`);
+    }
+
+    return parseFloat(dayData['4. close']);
+  } catch (error) {
+    if (error.response) {
+      throw new Error(`API error: ${error.response.status}`);
+    }
+    throw error;
+  }
+};
+
+/**
  * Get cached price from database
  */
 const getCachedPrice = async (ticker) => {
@@ -194,9 +273,32 @@ const getBatchStockPrices = async (tickers) => {
   return { prices, errors };
 };
 
+/**
+ * Get historical stock price for a specific date
+ * @param {string} ticker - Stock ticker symbol
+ * @param {string} date - Date in YYYY-MM-DD format
+ * @returns {Promise<number>} Historical closing price
+ */
+const getHistoricalPrice = async (ticker, date) => {
+  const upperTicker = ticker.toUpperCase();
+  const provider = process.env.STOCK_API_PROVIDER || 'alphavantage';
+
+  try {
+    if (provider === 'polygon') {
+      return await fetchHistoricalFromPolygon(upperTicker, date);
+    } else {
+      return await fetchHistoricalFromAlphaVantage(upperTicker, date);
+    }
+  } catch (error) {
+    console.error(`Error fetching historical price for ${upperTicker} on ${date}:`, error.message);
+    throw error;
+  }
+};
+
 module.exports = {
   getStockPrice,
   getBatchStockPrices,
   getCachedPrice,
-  updatePriceCache
+  updatePriceCache,
+  getHistoricalPrice
 };

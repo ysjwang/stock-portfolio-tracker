@@ -53,6 +53,8 @@ export const stockApi = {
     api.get(`/stocks/${ticker}/price`, { params: { refresh } }),
   getBatchPrices: (tickers) =>
     api.post('/stocks/prices', { tickers }),
+  getHistoricalPrice: (ticker, date) =>
+    api.get(`/stocks/${ticker}/historical/${date}`),
 };
 
 export default api;
