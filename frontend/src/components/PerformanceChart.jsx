@@ -11,6 +11,7 @@ import {
   PieChart,
   Pie,
   Cell,
+  ReferenceArea,
 } from 'recharts';
 import { portfolioApi } from '../services/api';
 
@@ -25,6 +26,8 @@ const PerformanceChart = () => {
   const [tickInterval, setTickInterval] = useState('day');
   const [activeChart, setActiveChart] = useState('performance');
   const [dateRange, setDateRange] = useState({ preset: 'all', start: null, end: null });
+  const [refAreaLeft, setRefAreaLeft] = useState('');
+  const [refAreaRight, setRefAreaRight] = useState('');
 
   useEffect(() => {
     const fetchData = async () => {
@@ -287,6 +290,27 @@ const PerformanceChart = () => {
     setDateRange(prev => ({ ...prev, [type]: val }));
   };
 
+  const zoom = () => {
+    let left = refAreaLeft;
+    let right = refAreaRight;
+
+    if (left === right || right === '') {
+      setRefAreaLeft('');
+      setRefAreaRight('');
+      return;
+    }
+
+    // Ensure left < right
+    if (left > right) [left, right] = [right, left];
+
+    // Convert timestamps to YYYY-MM-DD
+    const startDate = new Date(left).toISOString().split('T')[0];
+    const endDate = new Date(right).toISOString().split('T')[0];
+
+    setDateRange({ preset: 'custom', start: startDate, end: endDate });
+    setRefAreaLeft('');
+    setRefAreaRight('');
+  };
 
   if (loading) {
     return (
@@ -405,7 +429,12 @@ const PerformanceChart = () => {
       {activeChart === 'performance' && chartData.length > 0 && (
         <div>
           <ResponsiveContainer width="100%" height={400}>
-            <LineChart data={chartData}>
+            <LineChart
+              data={chartData}
+              onMouseDown={(e) => e && setRefAreaLeft(e.activeLabel)}
+              onMouseMove={(e) => refAreaLeft && e && setRefAreaRight(e.activeLabel)}
+              onMouseUp={zoom}
+            >
               <CartesianGrid strokeDasharray="3 3" />
               <XAxis
                 dataKey="timestamp"
@@ -415,8 +444,9 @@ const PerformanceChart = () => {
                 tickFormatter={formatDate}
                 interval={0}
                 minTickGap={0}
+                allowDataOverflow
               />
-              <YAxis tickFormatter={formatCurrency} domain={['auto', 'auto']} />
+              <YAxis tickFormatter={formatCurrency} domain={['auto', 'auto']} allowDataOverflow />
               <Tooltip
                 formatter={(value) => formatCurrency(value)}
                 labelFormatter={(label) => `Date: ${new Date(label).toLocaleDateString()}`}
@@ -431,6 +461,7 @@ const PerformanceChart = () => {
                 dot={{ r: 4 }}
                 activeDot={{ r: 6 }}
                 connectNulls={true}
+                isAnimationActive={false} // Disable animation for smoother drags
               />
               <Line
                 type="monotone"
@@ -441,7 +472,11 @@ const PerformanceChart = () => {
                 name="Total Invested"
                 dot={{ r: 4 }}
                 connectNulls={true}
+                isAnimationActive={false}
               />
+              {refAreaLeft && refAreaRight ? (
+                <ReferenceArea x1={refAreaLeft} x2={refAreaRight} strokeOpacity={0.3} />
+              ) : null}
             </LineChart>
           </ResponsiveContainer>
 
