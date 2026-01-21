@@ -205,6 +205,36 @@ router.put('/:id', async (req, res, next) => {
   }
 });
 
+// POST /api/transactions/bulk-delete - Delete multiple transactions
+router.post('/bulk-delete', async (req, res, next) => {
+  try {
+    const { ids } = req.body;
+
+    // Validation
+    if (!ids || !Array.isArray(ids) || ids.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'ids must be a non-empty array'
+      });
+    }
+
+    // Create placeholders for the SQL query ($1, $2, $3, etc.)
+    const placeholders = ids.map((_, index) => `$${index + 1}`).join(', ');
+    const queryText = `DELETE FROM transactions WHERE id IN (${placeholders}) RETURNING *`;
+
+    const result = await query(queryText, ids);
+
+    res.json({
+      success: true,
+      message: `${result.rows.length} transaction(s) deleted successfully`,
+      count: result.rows.length,
+      data: result.rows
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 // DELETE /api/transactions/:id - Delete transaction
 router.delete('/:id', async (req, res, next) => {
   try {

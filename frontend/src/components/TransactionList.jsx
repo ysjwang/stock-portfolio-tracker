@@ -11,6 +11,7 @@ const TransactionList = () => {
   const [sortBy, setSortBy] = useState('transaction_date');
   const [sortOrder, setSortOrder] = useState('DESC');
   const [editingTransaction, setEditingTransaction] = useState(null);
+  const [selectedIds, setSelectedIds] = useState([]);
 
   const fetchTransactions = async () => {
     try {
@@ -56,6 +57,47 @@ const TransactionList = () => {
     }
   };
 
+  const handleBulkDelete = async () => {
+    if (selectedIds.length === 0) {
+      return;
+    }
+
+    const message = `Are you sure you want to delete ${selectedIds.length} transaction${selectedIds.length !== 1 ? 's' : ''}?`;
+    if (!window.confirm(message)) {
+      return;
+    }
+
+    try {
+      await transactionApi.bulkDelete(selectedIds);
+      setSelectedIds([]);
+      fetchTransactions();
+    } catch (err) {
+      alert('Failed to delete transactions');
+      console.error(err);
+    }
+  };
+
+  const handleSelectAll = (e) => {
+    if (e.target.checked) {
+      setSelectedIds(transactions.map(t => t.id));
+    } else {
+      setSelectedIds([]);
+    }
+  };
+
+  const handleSelectOne = (id) => {
+    setSelectedIds(prev => {
+      if (prev.includes(id)) {
+        return prev.filter(selectedId => selectedId !== id);
+      } else {
+        return [...prev, id];
+      }
+    });
+  };
+
+  const isSelected = (id) => selectedIds.includes(id);
+  const isAllSelected = transactions.length > 0 && selectedIds.length === transactions.length;
+
   const handleEdit = (transaction) => {
     setEditingTransaction(transaction);
   };
@@ -96,8 +138,18 @@ const TransactionList = () => {
     <div className="card">
       <div className="flex justify-between items-center mb-6">
         <h2 className="text-2xl font-bold">Transaction History</h2>
-        <div className="text-sm text-gray-600">
-          {transactions.length} transaction{transactions.length !== 1 ? 's' : ''}
+        <div className="flex items-center gap-4">
+          {selectedIds.length > 0 && (
+            <button
+              onClick={handleBulkDelete}
+              className="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-md text-sm font-medium transition-colors"
+            >
+              Delete {selectedIds.length} selected
+            </button>
+          )}
+          <div className="text-sm text-gray-600">
+            {transactions.length} transaction{transactions.length !== 1 ? 's' : ''}
+          </div>
         </div>
       </div>
 
@@ -171,6 +223,14 @@ const TransactionList = () => {
           <table className="table">
             <thead>
               <tr>
+                <th className="table-header w-12">
+                  <input
+                    type="checkbox"
+                    checked={isAllSelected}
+                    onChange={handleSelectAll}
+                    className="w-4 h-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+                  />
+                </th>
                 <th className="table-header">Date</th>
                 <th className="table-header">Ticker</th>
                 <th className="table-header">Type</th>
@@ -183,6 +243,14 @@ const TransactionList = () => {
             <tbody className="bg-white divide-y divide-gray-200">
               {transactions.map((transaction) => (
                 <tr key={transaction.id} className="hover:bg-gray-50">
+                  <td className="table-cell">
+                    <input
+                      type="checkbox"
+                      checked={isSelected(transaction.id)}
+                      onChange={() => handleSelectOne(transaction.id)}
+                      className="w-4 h-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+                    />
+                  </td>
                   <td className="table-cell">{formatDate(transaction.transaction_date)}</td>
                   <td className="table-cell">
                     <span className="font-semibold">{transaction.ticker}</span>
